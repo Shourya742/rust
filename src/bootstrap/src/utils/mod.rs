@@ -13,7 +13,7 @@ pub(crate) mod job;
 pub(crate) mod render_tests;
 pub(crate) mod shared_helpers;
 pub(crate) mod tarball;
-
+pub(crate) mod context;
 pub(crate) mod tracing;
 
 #[cfg(feature = "build-metrics")]
