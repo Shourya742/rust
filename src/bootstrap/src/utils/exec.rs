@@ -14,7 +14,7 @@ use build_helper::drop_bomb::DropBomb;
 use crate::Build;
 
 /// What should be done when the command fails.
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 pub enum BehaviorOnFailure {
     /// Immediately stop bootstrap.
     Exit,
