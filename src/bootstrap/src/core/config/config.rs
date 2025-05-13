@@ -30,6 +30,7 @@ use crate::core::config::flags::{Color, Flags, Warnings};
 use crate::core::download::is_download_ci_available;
 use crate::utils::cache::{INTERNER, Interned};
 use crate::utils::channel::{self, GitInfo};
+use crate::utils::context::ExecutionContext;
 use crate::utils::helpers::{self, exe, output, t};
 
 /// Each path in this list is considered "allowed" in the `download-rustc="if-unchanged"` logic.
@@ -1462,8 +1463,10 @@ impl Config {
         feature = "tracing",
         instrument(target = "CONFIG_HANDLING", level = "trace", name = "Config::parse", skip_all)
     )]
-    pub fn parse(flags: Flags) -> Config {
-        Self::parse_inner(flags, Self::get_toml)
+    pub fn parse(flags: Flags) -> (Config, ExecutionContext) {
+        let mut exec_context = ExecutionContext::new(flags.dry_run, flags.verbose as usize, false);
+        let config = Self::parse_inner(flags, Self::get_toml, &mut exec_context);
+        (config, exec_context)
     }
 
     #[cfg_attr(
@@ -1478,6 +1481,7 @@ impl Config {
     pub(crate) fn parse_inner(
         mut flags: Flags,
         get_toml: impl Fn(&Path) -> Result<TomlConfig, toml::de::Error>,
+        exec_context: &mut ExecutionContext,
     ) -> Config {
         let mut config = Config::default_opts();
 
@@ -1600,11 +1604,11 @@ impl Config {
         let using_default_path = toml_path.is_none();
         let mut toml_path = toml_path.unwrap_or_else(|| PathBuf::from("bootstrap.toml"));
 
-        if using_default_path && !toml_path.exists() {
+        if using_default_path && !exec_context.path_exists(&toml_path) {
             toml_path = config.src.join(PathBuf::from("bootstrap.toml"));
-            if !toml_path.exists() {
+            if !exec_context.path_exists(&toml_path) {
                 toml_path = PathBuf::from("config.toml");
-                if !toml_path.exists() {
+                if !exec_context.path_exists(&toml_path) {
                     toml_path = config.src.join(PathBuf::from("config.toml"));
                 }
             }
@@ -1612,7 +1616,7 @@ impl Config {
 
         // Give a hard error if `--config` or `RUST_BOOTSTRAP_CONFIG` are set to a missing path,
         // but not if `bootstrap.toml` hasn't been created.
-        let mut toml = if !using_default_path || toml_path.exists() {
+        let mut toml = if !using_default_path || exec_context.path_exists(&toml_path) {
             config.config = Some(if cfg!(not(test)) {
                 toml_path = toml_path.canonicalize().unwrap();
                 toml_path.clone()

@@ -36,6 +36,7 @@ use utils::channel::GitInfo;
 use crate::core::builder;
 use crate::core::builder::Kind;
 use crate::core::config::{DryRun, LldMode, LlvmLibunwind, TargetSelection, flags};
+use crate::utils::context::ExecutionContext;
 use crate::utils::exec::{BehaviorOnFailure, BootstrapCommand, CommandOutput, OutputMode, command};
 use crate::utils::helpers::{
     self, dir_is_empty, exe, libdir, output, set_file_times, split_debuginfo, symlink_dir,
@@ -333,7 +334,7 @@ impl Build {
     /// line and the filesystem `config`.
     ///
     /// By default all build output will be placed in the current directory.
-    pub fn new(mut config: Config) -> Build {
+    pub fn new(mut config: Config, _exec_context: ExecutionContext) -> Build {
         let src = config.src.clone();
         let out = config.out.clone();
 

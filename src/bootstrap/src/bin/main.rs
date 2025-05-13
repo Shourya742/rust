@@ -31,7 +31,7 @@ fn main() {
     debug!("parsing flags");
     let flags = Flags::parse(&args);
     debug!("parsing config based on flags");
-    let config = Config::parse(flags);
+    let (config, exec_context) = Config::parse(flags);
 
     let mut build_lock;
     let _build_lock_guard;
@@ -96,7 +96,7 @@ fn main() {
     let out_dir = config.out.clone();
 
     debug!("creating new build based on config");
-    Build::new(config).build();
+    Build::new(config, exec_context).build();
 
     if suggest_setup {
         println!("WARNING: you have not made a `bootstrap.toml`");
