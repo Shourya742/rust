@@ -213,6 +213,7 @@ impl From<Command> for BootstrapCommand {
     }
 }
 
+#[derive(Clone)]
 /// Represents the current status of `BootstrapCommand`.
 enum CommandStatus {
     /// The command has started and finished with some status.
@@ -229,6 +230,7 @@ pub fn command<S: AsRef<OsStr>>(program: S) -> BootstrapCommand {
     BootstrapCommand::new(program)
 }
 
+#[derive(Clone)]
 /// Represents the output of an executed process.
 pub struct CommandOutput {
     status: CommandStatus,

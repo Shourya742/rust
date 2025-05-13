@@ -6,11 +6,12 @@ use std::path::Path;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use build_helper::git::PathFreshness;
+use build_helper::ci::CiEnv;
+use build_helper::git::{GitConfig, PathFreshness};
 
 use crate::CommandOutput;
 
-use super::cache::Interned;
+use super::cache::{Interned, INTERNER};
 use super::exec::{BehaviorOnFailure, BootstrapCommand, OutputMode};
 
 
@@ -128,44 +129,99 @@ impl ExecutionContext {
         result
     }
 
-
-    pub fn git_command_output(&mut self, cwd: Option<&Path>, args: &[&OsStr]) -> Result<String, String> {
-        let program = Path::new("git");
-        let mut cmd = BootstrapCommand::new(program);
-        if let Some(dir) = cwd { cmd.current_dir(dir); }
-        cmd.args(args);
-        cmd.allow_failure().run_always();
-
+    pub fn run_cmd(&mut self, mut cmd: BootstrapCommand, stdout_mode: OutputMode, stderr_mode: OutputMode) -> Result<CommandOutput, String>{
         let command_key = {
-            let mut key_program = PathBuf::from(program);
-            let key_args: Vec<Vec<u8>> = args.iter().map(|a| a.as_bytes().to_vec()).collect();
-            let key_cwd = cwd.map(|p| p.to_path_buf());
+            let command = cmd.as_command_mut();
+            let key_program = PathBuf::from(command.get_program());
+            let key_args: Vec<Vec<u8>> = command.get_args().map(|a| a.as_bytes().to_vec()).collect();
+            let key_cwd = command.get_current_dir().map(|p| p.to_path_buf());
             (key_program, key_args, key_cwd)
         };
 
         let mut cache = self.command_output_cache.lock().unwrap();
         if let Some(cached_result) = cache.get(&command_key) {
-            self.verbose_print(&format!("(cached) Running git command: {:?}", cmd));
-            return cached_result.as_ref().and_then(|output| output.stdout_if_present()).and_then(|| "Cached command failed".to_string());
+            self.verbose_print(&format!("(cache) Running BootstrapCommand: {:?}", cmd));
+            return cached_result.clone();
         }
 
-        let result = self.execute_bootstrap_command_internal(&mut cmd, OutputMode::Capture, OutputMode::Capture);
-
+        let result = self.execute_bootstrap_command_internal(&mut cmd, stdout_mode, stderr_mode);
         cache.insert(command_key.clone(), result.clone());
-
-        result.and_then(|output| output.stdout_if_present().ok_or_else(|| "Command succeeded but stdout not captured or invalid UTF-8".to_string()))
-           .map_err(|e| format!("Git command failed: {}", e)) 
-
+        result
     }
+
+
+    pub fn check_path_modifications<'a> (&'a mut self, src_dir: &Path, git_config: &GitConfig<'a>, paths: &[&'static str]) -> PathFreshness {
+
+        let cache_key = (src_dir.to_path_buf(), INTERNER.intern_str(&paths.join(",")));
+
+        let mut cache = self.path_modifications_cache.lock().unwrap();
+        if let Some(cached_result) = cache.get(&cache_key) {
+            self.verbose_print(&format!("(cached) check_path_modifications for paths: {:?}", paths));
+            return cached_result.clone();
+        }
+
+        self.verbose_print(&format!("Running check_path_modification for paths: {:?}", paths));
+        let result = build_helper::git::check_path_modifications(src_dir, git_config, paths, CiEnv::current()).expect("check_path_modification_with_context failed");
+        cache.insert(cache_key, result.clone());
+        result
+    }
+
 
     pub fn fatal_error(&self, msg: &str) {
         eprintln!("fatal error: {}", msg);
         std::process::exit(1);
     }
 
+
+    pub fn warn(&self, msg: &str) {
+        eprintln!("warning: {}", msg);
+    }
+
     pub fn verbose_print(&self, msg: &str) {
         if self.verbose > 0 {
             println!("{}", msg);
         }
+    }
+
+    pub fn verbose(&self, f: impl Fn()) {
+        if self.verbose > 0 {
+            f();
+        }
+    }
+
+    pub fn is_dry_run(&self) -> bool {
+        self.dry_run
+    }
+
+    pub fn is_verbose(&self) -> bool {
+        self.verbose > 0
+    }
+
+    pub fn is_fail_fast(&self) -> bool {
+        self.fail_fast
+    }
+
+
+    pub fn git_command_for_path_check(&mut self, cwd: Option<&Path>, args: &[&OsStr]) -> Result<CommandOutput, String> {
+        let program = Path::new("git");
+        let mut cmd = BootstrapCommand::new(program);
+        if let Some(dir) = cwd { cmd.current_dir(dir); };
+        cmd.args(args);
+        cmd = cmd.allow_failure();
+        cmd.run_always();
+        let output = self.run_cmd(cmd, OutputMode::Capture, OutputMode::Capture)?;
+        Ok(output)
+    }
+
+    pub fn git_command_status_for_diff_index(&mut self, cwd: Option<&Path>, base: &str, paths: &[&str]) -> Result<bool, String> {
+        let program = Path::new("git");
+        let mut cmd = BootstrapCommand::new(program);
+        if let Some(dir) = cwd {cmd.current_dir(dir);};
+        cmd.args(["diff-index", "--quiet", base, "--"]).args(paths);
+        cmd  = cmd.allow_failure();
+        cmd.run_always();
+        let output = self.run_cmd(cmd, OutputMode::Print, OutputMode::Print)?;
+
+        Ok(!output.is_success())
     }
 }
