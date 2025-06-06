@@ -3,8 +3,9 @@ use std::path::PathBuf;
 use crate::{BuildStamp, Config, Flags};
 
 fn temp_dir() -> PathBuf {
-    let config =
-        Config::parse(Flags::parse(&["check".to_owned(), "--config=/does/not/exist".to_owned()]));
+    let (flags, exec_ctx) =
+        Flags::parse(&["check".to_owned(), "--config=/does/not/exist".to_owned()]);
+    let config = Config::parse(flags, exec_ctx);
     config.tempdir()
 }
 

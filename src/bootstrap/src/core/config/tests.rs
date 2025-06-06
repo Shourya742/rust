@@ -21,10 +21,9 @@ use crate::core::config::{LldMode, Target, TargetSelection};
 use crate::utils::tests::git::git_test;
 
 pub(crate) fn parse(config: &str) -> Config {
-    Config::parse_inner(
-        Flags::parse(&["check".to_string(), "--config=/does/not/exist".to_string()]),
-        |&_| toml::from_str(&config),
-    )
+    let (flags, exec_ctx) =
+        Flags::parse(&["check".to_string(), "--config=/does/not/exist".to_string()]);
+    Config::parse_inner(flags, |&_| toml::from_str(&config), exec_ctx)
 }
 
 fn get_toml(file: &Path) -> Result<TomlConfig, toml::de::Error> {
@@ -127,23 +126,24 @@ fn clap_verify() {
 
 #[test]
 fn override_toml() {
+    let (flags, exec_ctx) = Flags::parse(&[
+        "check".to_owned(),
+        "--config=/does/not/exist".to_owned(),
+        "--set=change-id=1".to_owned(),
+        "--set=rust.lto=fat".to_owned(),
+        "--set=rust.deny-warnings=false".to_owned(),
+        "--set=build.optimized-compiler-builtins=true".to_owned(),
+        "--set=build.gdb=\"bar\"".to_owned(),
+        "--set=build.tools=[\"cargo\"]".to_owned(),
+        "--set=llvm.build-config={\"foo\" = \"bar\"}".to_owned(),
+        "--set=target.x86_64-unknown-linux-gnu.runner=bar".to_owned(),
+        "--set=target.x86_64-unknown-linux-gnu.rpath=false".to_owned(),
+        "--set=target.aarch64-unknown-linux-gnu.sanitizers=false".to_owned(),
+        "--set=target.aarch64-apple-darwin.runner=apple".to_owned(),
+        "--set=target.aarch64-apple-darwin.optimized-compiler-builtins=false".to_owned(),
+    ]);
     let config = Config::parse_inner(
-        Flags::parse(&[
-            "check".to_owned(),
-            "--config=/does/not/exist".to_owned(),
-            "--set=change-id=1".to_owned(),
-            "--set=rust.lto=fat".to_owned(),
-            "--set=rust.deny-warnings=false".to_owned(),
-            "--set=build.optimized-compiler-builtins=true".to_owned(),
-            "--set=build.gdb=\"bar\"".to_owned(),
-            "--set=build.tools=[\"cargo\"]".to_owned(),
-            "--set=llvm.build-config={\"foo\" = \"bar\"}".to_owned(),
-            "--set=target.x86_64-unknown-linux-gnu.runner=bar".to_owned(),
-            "--set=target.x86_64-unknown-linux-gnu.rpath=false".to_owned(),
-            "--set=target.aarch64-unknown-linux-gnu.sanitizers=false".to_owned(),
-            "--set=target.aarch64-apple-darwin.runner=apple".to_owned(),
-            "--set=target.aarch64-apple-darwin.optimized-compiler-builtins=false".to_owned(),
-        ]),
+        flags,
         |&_| {
             toml::from_str(
                 r#"
@@ -174,6 +174,7 @@ runner = "x86_64-runner"
                 "#,
             )
         },
+        exec_ctx,
     );
     assert_eq!(config.change_id, Some(ChangeId::Id(1)), "setting top-level value");
     assert_eq!(
@@ -229,15 +230,13 @@ runner = "x86_64-runner"
 #[test]
 #[should_panic]
 fn override_toml_duplicate() {
-    Config::parse_inner(
-        Flags::parse(&[
-            "check".to_owned(),
-            "--config=/does/not/exist".to_string(),
-            "--set=change-id=1".to_owned(),
-            "--set=change-id=2".to_owned(),
-        ]),
-        |&_| toml::from_str("change-id = 0"),
-    );
+    let (flags, exec_ctx) = Flags::parse(&[
+        "check".to_owned(),
+        "--config=/does/not/exist".to_string(),
+        "--set=change-id=1".to_owned(),
+        "--set=change-id=2".to_owned(),
+    ]);
+    Config::parse_inner(flags, |&_| toml::from_str("change-id = 0"), exec_ctx);
 }
 
 #[test]
@@ -255,7 +254,8 @@ fn profile_user_dist() {
 
         toml::from_str(&contents).and_then(|table: toml::Value| TomlConfig::deserialize(table))
     }
-    Config::parse_inner(Flags::parse(&["check".to_owned()]), get_toml);
+    let (flags, exec_ctx) = Flags::parse(&["check".to_owned()]);
+    Config::parse_inner(flags, get_toml, exec_ctx);
 }
 
 #[test]
@@ -330,7 +330,8 @@ fn order_of_clippy_rules() {
         "-Aclippy::foo1".to_string(),
         "-Aclippy::foo2".to_string(),
     ];
-    let config = Config::parse(Flags::parse(&args));
+    let (flags, exec_ctx) = Flags::parse(&args);
+    let config = Config::parse(flags, exec_ctx);
 
     let actual = match config.cmd.clone() {
         crate::Subcommand::Clippy { allow, deny, warn, forbid, .. } => {
@@ -354,7 +355,8 @@ fn order_of_clippy_rules() {
 fn clippy_rule_separate_prefix() {
     let args =
         vec!["clippy".to_string(), "-A clippy:all".to_string(), "-W clippy::style".to_string()];
-    let config = Config::parse(Flags::parse(&args));
+    let (flags, exec_ctx) = Flags::parse(&args);
+    let config = Config::parse(flags, exec_ctx);
 
     let actual = match config.cmd.clone() {
         crate::Subcommand::Clippy { allow, deny, warn, forbid, .. } => {
@@ -370,10 +372,12 @@ fn clippy_rule_separate_prefix() {
 
 #[test]
 fn verbose_tests_default_value() {
-    let config = Config::parse(Flags::parse(&["build".into(), "compiler".into()]));
+    let (flags, exec_ctx) = Flags::parse(&["build".into(), "compiler".into()]);
+    let config = Config::parse(flags, exec_ctx);
     assert_eq!(config.verbose_tests, false);
 
-    let config = Config::parse(Flags::parse(&["build".into(), "compiler".into(), "-v".into()]));
+    let (flags, exec_ctx) = Flags::parse(&["build".into(), "compiler".into(), "-v".into()]);
+    let config = Config::parse(flags, exec_ctx);
     assert_eq!(config.verbose_tests, true);
 }
 
@@ -407,24 +411,24 @@ fn parse_jobs() {
 fn jobs_precedence() {
     // `--jobs` should take precedence over using `--set build.jobs`.
 
-    let config = Config::parse_inner(
-        Flags::parse(&[
-            "check".to_owned(),
-            "--config=/does/not/exist".to_owned(),
-            "--jobs=67890".to_owned(),
-            "--set=build.jobs=12345".to_owned(),
-        ]),
-        |&_| toml::from_str(""),
-    );
+    let (flags, exec_ctx) = Flags::parse(&[
+        "check".to_owned(),
+        "--config=/does/not/exist".to_owned(),
+        "--jobs=67890".to_owned(),
+        "--set=build.jobs=12345".to_owned(),
+    ]);
+    let config = Config::parse_inner(flags, |&_| toml::from_str(""), exec_ctx);
     assert_eq!(config.jobs, Some(67890));
+
+    let (flags, exec_ctx) = Flags::parse(&[
+        "check".to_owned(),
+        "--config=/does/not/exist".to_owned(),
+        "--set=build.jobs=12345".to_owned(),
+    ]);
 
     // `--set build.jobs` should take precedence over `bootstrap.toml`.
     let config = Config::parse_inner(
-        Flags::parse(&[
-            "check".to_owned(),
-            "--config=/does/not/exist".to_owned(),
-            "--set=build.jobs=12345".to_owned(),
-        ]),
+        flags,
         |&_| {
             toml::from_str(
                 r#"
@@ -433,17 +437,20 @@ fn jobs_precedence() {
         "#,
             )
         },
+        exec_ctx,
     );
     assert_eq!(config.jobs, Some(12345));
 
+    let (flags, exec_ctx) = Flags::parse(&[
+        "check".to_owned(),
+        "--jobs=123".to_owned(),
+        "--config=/does/not/exist".to_owned(),
+        "--set=build.jobs=456".to_owned(),
+    ]);
+
     // `--jobs` > `--set build.jobs` > `bootstrap.toml`
     let config = Config::parse_inner(
-        Flags::parse(&[
-            "check".to_owned(),
-            "--jobs=123".to_owned(),
-            "--config=/does/not/exist".to_owned(),
-            "--set=build.jobs=456".to_owned(),
-        ]),
+        flags,
         |&_| {
             toml::from_str(
                 r#"
@@ -452,6 +459,7 @@ fn jobs_precedence() {
         "#,
             )
         },
+        exec_ctx,
     );
     assert_eq!(config.jobs, Some(123));
 }
@@ -473,8 +481,10 @@ fn check_rustc_if_unchanged_paths() {
 
 #[test]
 fn test_explicit_stage() {
+    let (flags, exec_ctx) =
+        Flags::parse(&["check".to_owned(), "--config=/does/not/exist".to_owned()]);
     let config = Config::parse_inner(
-        Flags::parse(&["check".to_owned(), "--config=/does/not/exist".to_owned()]),
+        flags,
         |&_| {
             toml::from_str(
                 r#"
@@ -483,31 +493,33 @@ fn test_explicit_stage() {
         "#,
             )
         },
+        exec_ctx,
     );
 
     assert!(!config.explicit_stage_from_cli);
     assert!(config.explicit_stage_from_config);
     assert!(config.is_explicit_stage());
 
-    let config = Config::parse_inner(
-        Flags::parse(&[
-            "check".to_owned(),
-            "--stage=2".to_owned(),
-            "--config=/does/not/exist".to_owned(),
-        ]),
-        |&_| toml::from_str(""),
-    );
+    let (flags, exec_ctx) = Flags::parse(&[
+        "check".to_owned(),
+        "--stage=2".to_owned(),
+        "--config=/does/not/exist".to_owned(),
+    ]);
+
+    let config = Config::parse_inner(flags, |&_| toml::from_str(""), exec_ctx);
 
     assert!(config.explicit_stage_from_cli);
     assert!(!config.explicit_stage_from_config);
     assert!(config.is_explicit_stage());
 
+    let (flags, exec_ctx) = Flags::parse(&[
+        "check".to_owned(),
+        "--stage=2".to_owned(),
+        "--config=/does/not/exist".to_owned(),
+    ]);
+
     let config = Config::parse_inner(
-        Flags::parse(&[
-            "check".to_owned(),
-            "--stage=2".to_owned(),
-            "--config=/does/not/exist".to_owned(),
-        ]),
+        flags,
         |&_| {
             toml::from_str(
                 r#"
@@ -516,16 +528,17 @@ fn test_explicit_stage() {
         "#,
             )
         },
+        exec_ctx,
     );
 
     assert!(config.explicit_stage_from_cli);
     assert!(config.explicit_stage_from_config);
     assert!(config.is_explicit_stage());
 
-    let config = Config::parse_inner(
-        Flags::parse(&["check".to_owned(), "--config=/does/not/exist".to_owned()]),
-        |&_| toml::from_str(""),
-    );
+    let (flags, exec_ctx) =
+        Flags::parse(&["check".to_owned(), "--config=/does/not/exist".to_owned()]);
+
+    let config = Config::parse_inner(flags, |&_| toml::from_str(""), exec_ctx);
 
     assert!(!config.explicit_stage_from_cli);
     assert!(!config.explicit_stage_from_config);
@@ -549,17 +562,18 @@ fn test_exclude() {
 
 #[test]
 fn test_ci_flag() {
-    let config = Config::parse_inner(Flags::parse(&["check".into(), "--ci=false".into()]), |&_| {
-        toml::from_str("")
-    });
+    let (flags, exec_ctx) = Flags::parse(&["check".into(), "--ci=false".into()]);
+    let config = Config::parse_inner(flags, |&_| toml::from_str(""), exec_ctx);
     assert!(!config.is_running_on_ci);
 
-    let config = Config::parse_inner(Flags::parse(&["check".into(), "--ci=true".into()]), |&_| {
-        toml::from_str("")
-    });
+    let (flags, exec_ctx) = Flags::parse(&["check".into(), "--ci=true".into()]);
+
+    let config = Config::parse_inner(flags, |&_| toml::from_str(""), exec_ctx);
     assert!(config.is_running_on_ci);
 
-    let config = Config::parse_inner(Flags::parse(&["check".into()]), |&_| toml::from_str(""));
+    let (flags, exec_ctx) = Flags::parse(&["check".into()]);
+
+    let config = Config::parse_inner(flags, |&_| toml::from_str(""), exec_ctx);
     assert_eq!(config.is_running_on_ci, CiEnv::is_ci());
 }
 
@@ -595,10 +609,9 @@ fn test_precedence_of_includes() {
     "#;
     File::create(extension).unwrap().write_all(extension_content).unwrap();
 
-    let config = Config::parse_inner(
-        Flags::parse(&["check".to_owned(), format!("--config={}", root_config.to_str().unwrap())]),
-        get_toml,
-    );
+    let (flags, exec_ctx) =
+        Flags::parse(&["check".to_owned(), format!("--config={}", root_config.to_str().unwrap())]);
+    let config = Config::parse_inner(flags, get_toml, exec_ctx);
 
     assert_eq!(config.change_id.unwrap(), ChangeId::Id(543));
     assert_eq!(config.llvm_link_jobs.unwrap(), 2);
@@ -622,10 +635,9 @@ fn test_cyclic_include_direct() {
     "#;
     File::create(extension).unwrap().write_all(extension_content).unwrap();
 
-    let config = Config::parse_inner(
-        Flags::parse(&["check".to_owned(), format!("--config={}", root_config.to_str().unwrap())]),
-        get_toml,
-    );
+    let (flags, exec_ctx) =
+        Flags::parse(&["check".to_owned(), format!("--config={}", root_config.to_str().unwrap())]);
+    let config = Config::parse_inner(flags, get_toml, exec_ctx);
 }
 
 #[test]
@@ -657,10 +669,10 @@ fn test_cyclic_include_indirect() {
     "#;
     File::create(extension).unwrap().write_all(extension_content).unwrap();
 
-    let config = Config::parse_inner(
-        Flags::parse(&["check".to_owned(), format!("--config={}", root_config.to_str().unwrap())]),
-        get_toml,
-    );
+    let (flags, exec_ctx) =
+        Flags::parse(&["check".to_owned(), format!("--config={}", root_config.to_str().unwrap())]);
+
+    let config = Config::parse_inner(flags, get_toml, exec_ctx);
 }
 
 #[test]
@@ -676,10 +688,10 @@ fn test_include_absolute_paths() {
     let root_config_content = format!(r#"include = ["{}"]"#, extension_absolute_path);
     File::create(&root_config).unwrap().write_all(root_config_content.as_bytes()).unwrap();
 
-    let config = Config::parse_inner(
-        Flags::parse(&["check".to_owned(), format!("--config={}", root_config.to_str().unwrap())]),
-        get_toml,
-    );
+    let (flags, exec_ctx) =
+        Flags::parse(&["check".to_owned(), format!("--config={}", root_config.to_str().unwrap())]);
+
+    let config = Config::parse_inner(flags, get_toml, exec_ctx);
 }
 
 #[test]
@@ -715,10 +727,9 @@ fn test_include_relative_paths() {
     let extension = testdir.join("extension4.toml");
     File::create(extension).unwrap().write_all(&[]).unwrap();
 
-    let config = Config::parse_inner(
-        Flags::parse(&["check".to_owned(), format!("--config={}", root_config.to_str().unwrap())]),
-        get_toml,
-    );
+    let (flags, exec_ctx) =
+        Flags::parse(&["check".to_owned(), format!("--config={}", root_config.to_str().unwrap())]);
+    let config = Config::parse_inner(flags, get_toml, exec_ctx);
 }
 
 #[test]
@@ -739,10 +750,9 @@ fn test_include_precedence_over_profile() {
     "#;
     File::create(extension).unwrap().write_all(extension_content).unwrap();
 
-    let config = Config::parse_inner(
-        Flags::parse(&["check".to_owned(), format!("--config={}", root_config.to_str().unwrap())]),
-        get_toml,
-    );
+    let (flags, exec_ctx) =
+        Flags::parse(&["check".to_owned(), format!("--config={}", root_config.to_str().unwrap())]);
+    let config = Config::parse_inner(flags, get_toml, exec_ctx);
 
     // "dist" profile would normally set the channel to "auto-detect", but includes should
     // override profile settings, so we expect this to be "dev" here.

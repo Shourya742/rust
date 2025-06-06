@@ -19,7 +19,8 @@ fn configure(cmd: &str, host: &[&str], target: &[&str]) -> Config {
 }
 
 fn configure_with_args(cmd: &[String], host: &[&str], target: &[&str]) -> Config {
-    let mut config = Config::parse(Flags::parse(cmd));
+    let (flags, exec_ctx) = Flags::parse(cmd);
+    let mut config = Config::parse(flags, exec_ctx);
     // don't save toolstates
     config.save_toolstates = None;
     config.dry_run = DryRun::SelfCheck;
@@ -30,10 +31,11 @@ fn configure_with_args(cmd: &[String], host: &[&str], target: &[&str]) -> Config
     // The src/doc/book submodule is needed because TheBook step tries to
     // access files even during a dry-run (may want to consider just skipping
     // that in a dry run).
+    let (flags, exec_ctx) = Flags::parse(&["check".to_owned()]);
     let submodule_build = Build::new(Config {
         // don't include LLVM, so CI doesn't require ninja/cmake to be installed
         rust_codegen_backends: vec![],
-        ..Config::parse(Flags::parse(&["check".to_owned()]))
+        ..Config::parse(flags, exec_ctx)
     });
     submodule_build.require_submodule("src/doc/book", None);
     config.submodules = Some(false);
@@ -291,18 +293,16 @@ fn prepare_rustc_checkout(ctx: &mut GitCtx) {
 
 /// Parses a Config directory from `path`, with the given value of `download_rustc`.
 fn parse_config_download_rustc_at(path: &Path, download_rustc: &str, ci: bool) -> Config {
-    Config::parse_inner(
-        Flags::parse(&[
-            "build".to_owned(),
-            "--dry-run".to_owned(),
-            "--ci".to_owned(),
-            if ci { "true" } else { "false" }.to_owned(),
-            format!("--set=rust.download-rustc='{download_rustc}'"),
-            "--src".to_owned(),
-            path.to_str().unwrap().to_owned(),
-        ]),
-        |&_| Ok(Default::default()),
-    )
+    let (flags, exec_ctx) = Flags::parse(&[
+        "build".to_owned(),
+        "--dry-run".to_owned(),
+        "--ci".to_owned(),
+        if ci { "true" } else { "false" }.to_owned(),
+        format!("--set=rust.download-rustc='{download_rustc}'"),
+        "--src".to_owned(),
+        path.to_str().unwrap().to_owned(),
+    ]);
+    Config::parse_inner(flags, |&_| Ok(Default::default()), exec_ctx)
 }
 
 mod defaults {
@@ -692,7 +692,8 @@ mod dist {
             host = ["i686-unknown-netbsd"]
             target = ["i686-unknown-netbsd"]
         "#;
-        let config = Config::parse_inner(Flags::parse(cmd_args), |&_| toml::from_str(config_str));
+        let (flags, exec_ctx) = Flags::parse(cmd_args);
+        let config = Config::parse_inner(flags, |&_| toml::from_str(config_str), exec_ctx);
         let mut cache = run_build(&[], config);
 
         // Stage 2 `compile::Rustc` should **NEVER** be cached here.
@@ -1047,14 +1048,12 @@ fn test_test_coverage() {
 #[test]
 fn test_prebuilt_llvm_config_path_resolution() {
     fn configure(config: &str) -> Config {
-        Config::parse_inner(
-            Flags::parse(&[
-                "build".to_string(),
-                "--dry-run".to_string(),
-                "--config=/does/not/exist".to_string(),
-            ]),
-            |&_| toml::from_str(&config),
-        )
+        let (flags, exec_ctx) = Flags::parse(&[
+            "build".to_string(),
+            "--dry-run".to_string(),
+            "--config=/does/not/exist".to_string(),
+        ]);
+        Config::parse_inner(flags, |&_| toml::from_str(&config), exec_ctx)
     }
 
     // Removes Windows disk prefix if present
