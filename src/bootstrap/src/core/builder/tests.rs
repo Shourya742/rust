@@ -19,7 +19,8 @@ fn configure(cmd: &str, host: &[&str], target: &[&str]) -> Config {
 }
 
 fn configure_with_args(cmd: &[String], host: &[&str], target: &[&str]) -> Config {
-    let (flags, exec_ctx) = Flags::parse(cmd);
+    let (flags, mut exec_ctx) = Flags::parse(cmd);
+    exec_ctx.set_dry_run(DryRun::SelfCheck);
     let mut config = Config::parse(flags, exec_ctx);
     // don't save toolstates
     config.save_toolstates = None;
