@@ -850,6 +850,47 @@ download-rustc = false
         }
         self.unpack(&tarball, root_dir, "gcc");
     }
+
+    /// Bootstrap embeds a version number into the name of shared libraries it uploads in CI.
+    /// Return the version it would have used for the given commit.
+    pub(crate) fn artifact_version_part(&self, commit: &str) -> String {
+        let (channel, version) = if self.rust_info.is_managed_git_subrepository() {
+            let channel =
+                self.read_file_by_commit(Path::new("src/ci/channel"), commit).trim().to_owned();
+            let version =
+                self.read_file_by_commit(Path::new("src/version"), commit).trim().to_owned();
+            (channel, version)
+        } else {
+            let channel = fs::read_to_string(self.src.join("src/ci/channel"));
+            let version = fs::read_to_string(self.src.join("src/version"));
+            match (channel, version) {
+                (Ok(channel), Ok(version)) => {
+                    (channel.trim().to_owned(), version.trim().to_owned())
+                }
+                (channel, version) => {
+                    let src = self.src.display();
+                    eprintln!("ERROR: failed to determine artifact channel and/or version");
+                    eprintln!(
+                        "HELP: consider using a git checkout or ensure these files are readable"
+                    );
+                    if let Err(channel) = channel {
+                        eprintln!("reading {src}/src/ci/channel failed: {channel:?}");
+                    }
+                    if let Err(version) = version {
+                        eprintln!("reading {src}/src/version failed: {version:?}");
+                    }
+                    panic!();
+                }
+            }
+        };
+
+        match channel.as_str() {
+            "stable" => version,
+            "beta" => channel,
+            "nightly" => channel,
+            other => unreachable!("{:?} is not recognized as a valid channel", other),
+        }
+    }
 }
 
 fn path_is_dylib(path: &Path) -> bool {

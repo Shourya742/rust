@@ -3,6 +3,7 @@
 
 use serde::{Deserialize, Deserializer};
 
+use crate::core::build_steps::llvm::{self, LLVM_INVALIDATION_PATHS};
 use crate::core::config::toml::{Merge, ReplaceOpt, TomlConfig};
 use crate::core::config::{StringOrBool, set};
 use crate::{Config, HashMap, HashSet, PathBuf, define_config, exit};
@@ -266,5 +267,66 @@ impl Config {
         self.llvm_enzyme = llvm_enzyme.unwrap_or(false);
         self.llvm_offload = llvm_offload.unwrap_or(false);
         self.llvm_plugins = llvm_plugins.unwrap_or(false);
+    }
+
+    pub fn parse_download_ci_llvm(
+        &self,
+        download_ci_llvm: Option<StringOrBool>,
+        asserts: bool,
+    ) -> bool {
+        // We don't ever want to use `true` on CI, as we should not
+        // download upstream artifacts if there are any local modifications.
+        let default = if self.is_running_on_ci {
+            StringOrBool::String("if-unchanged".to_string())
+        } else {
+            StringOrBool::Bool(true)
+        };
+        let download_ci_llvm = download_ci_llvm.unwrap_or(default);
+
+        let if_unchanged = || {
+            if self.rust_info.is_from_tarball() {
+                // Git is needed for running "if-unchanged" logic.
+                println!("ERROR: 'if-unchanged' is only compatible with Git managed sources.");
+                crate::exit!(1);
+            }
+
+            // Fetching the LLVM submodule is unnecessary for self-tests.
+            #[cfg(not(test))]
+            self.update_submodule("src/llvm-project");
+
+            // Check for untracked changes in `src/llvm-project` and other important places.
+            let has_changes = self.has_changes_from_upstream(LLVM_INVALIDATION_PATHS);
+
+            // Return false if there are untracked changes, otherwise check if CI LLVM is available.
+            if has_changes {
+                false
+            } else {
+                crate::core::build_steps::llvm::is_ci_llvm_available_for_target(self, asserts)
+            }
+        };
+
+        match download_ci_llvm {
+            StringOrBool::Bool(b) => {
+                if !b && self.download_rustc_commit.is_some() {
+                    panic!(
+                        "`llvm.download-ci-llvm` cannot be set to `false` if `rust.download-rustc` is set to `true` or `if-unchanged`."
+                    );
+                }
+
+                if b && self.is_running_on_ci {
+                    // On CI, we must always rebuild LLVM if there were any modifications to it
+                    panic!(
+                        "`llvm.download-ci-llvm` cannot be set to `true` on CI. Use `if-unchanged` instead."
+                    );
+                }
+
+                // If download-ci-llvm=true we also want to check that CI llvm is available
+                b && llvm::is_ci_llvm_available_for_target(self, asserts)
+            }
+            StringOrBool::String(s) if s == "if-unchanged" => if_unchanged(),
+            StringOrBool::String(other) => {
+                panic!("unrecognized option for download-ci-llvm: {other:?}")
+            }
+        }
     }
 }

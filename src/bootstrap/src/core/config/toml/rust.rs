@@ -3,6 +3,7 @@
 
 use std::str::FromStr;
 
+use build_helper::git::PathFreshness;
 use serde::{Deserialize, Deserializer};
 
 use crate::core::build_steps::compile::CODEGEN_BACKEND_PREFIX;
@@ -10,8 +11,31 @@ use crate::core::config::toml::TomlConfig;
 use crate::core::config::{
     DebuginfoLevel, Merge, ReplaceOpt, RustcLto, StringOrBool, set, threads_from_config,
 };
+use crate::core::download::is_download_ci_available;
 use crate::flags::Warnings;
+use crate::utils::channel;
 use crate::{BTreeSet, Config, HashSet, PathBuf, TargetSelection, define_config, exit};
+
+/// Each path in this list is considered "allowed" in the `download-rustc="if-unchanged"` logic.
+/// This means they can be modified and changes to these paths should never trigger a compiler build
+/// when "if-unchanged" is set.
+///
+/// NOTE: Paths must have the ":!" prefix to tell git to ignore changes in those paths during
+/// the diff check.
+///
+/// WARNING: Be cautious when adding paths to this list. If a path that influences the compiler build
+/// is added here, it will cause bootstrap to skip necessary rebuilds, which may lead to risky results.
+/// For example, "src/bootstrap" should never be included in this list as it plays a crucial role in the
+/// final output/compiler, which can be significantly affected by changes made to the bootstrap sources.
+#[rustfmt::skip] // We don't want rustfmt to oneline this list
+pub const RUSTC_IF_UNCHANGED_ALLOWED_PATHS: &[&str] = &[
+    ":!library",
+    ":!src/tools",
+    ":!src/librustdoc",
+    ":!src/rustdoc-json-types",
+    ":!tests",
+    ":!triagebot.toml",
+];
 
 define_config! {
     /// TOML representation of how the Rust build is configured.
@@ -645,5 +669,86 @@ impl Config {
         self.rust_debuginfo_level_std = with_defaults(debuginfo_level_std);
         self.rust_debuginfo_level_tools = with_defaults(debuginfo_level_tools);
         self.rust_debuginfo_level_tests = debuginfo_level_tests.unwrap_or(DebuginfoLevel::None);
+    }
+
+    /// Returns the commit to download, or `None` if we shouldn't download CI artifacts.
+    pub fn download_ci_rustc_commit(
+        &self,
+        download_rustc: Option<StringOrBool>,
+        debug_assertions_requested: bool,
+        llvm_assertions: bool,
+    ) -> Option<String> {
+        if !is_download_ci_available(&self.host_target.triple, llvm_assertions) {
+            return None;
+        }
+
+        // If `download-rustc` is not set, default to rebuilding.
+        let if_unchanged = match download_rustc {
+            // Globally default `download-rustc` to `false`, because some contributors don't use
+            // profiles for reasons such as:
+            // - They need to seamlessly switch between compiler/library work.
+            // - They don't want to use compiler profile because they need to override too many
+            //   things and it's easier to not use a profile.
+            None | Some(StringOrBool::Bool(false)) => return None,
+            Some(StringOrBool::Bool(true)) => false,
+            Some(StringOrBool::String(s)) if s == "if-unchanged" => {
+                if !self.rust_info.is_managed_git_subrepository() {
+                    println!(
+                        "ERROR: `download-rustc=if-unchanged` is only compatible with Git managed sources."
+                    );
+                    crate::exit!(1);
+                }
+
+                true
+            }
+            Some(StringOrBool::String(other)) => {
+                panic!("unrecognized option for download-rustc: {other}")
+            }
+        };
+
+        let commit = if self.rust_info.is_managed_git_subrepository() {
+            // Look for a version to compare to based on the current commit.
+            // Only commits merged by bors will have CI artifacts.
+            let freshness = self.check_path_modifications(RUSTC_IF_UNCHANGED_ALLOWED_PATHS);
+            self.verbose(|| {
+                eprintln!("rustc freshness: {freshness:?}");
+            });
+            match freshness {
+                PathFreshness::LastModifiedUpstream { upstream } => upstream,
+                PathFreshness::HasLocalModifications { upstream } => {
+                    if if_unchanged {
+                        return None;
+                    }
+
+                    if self.is_running_on_ci {
+                        eprintln!("CI rustc commit matches with HEAD and we are in CI.");
+                        eprintln!(
+                            "`rustc.download-ci` functionality will be skipped as artifacts are not available."
+                        );
+                        return None;
+                    }
+
+                    upstream
+                }
+                PathFreshness::MissingUpstream => {
+                    eprintln!("No upstream commit found");
+                    return None;
+                }
+            }
+        } else {
+            channel::read_commit_info_file(&self.src)
+                .map(|info| info.sha.trim().to_owned())
+                .expect("git-commit-info is missing in the project root")
+        };
+
+        if debug_assertions_requested {
+            eprintln!(
+                "WARN: `rust.debug-assertions = true` will prevent downloading CI rustc as alt CI \
+                rustc is not currently built with debug assertions."
+            );
+            return None;
+        }
+
+        Some(commit)
     }
 }

@@ -28,8 +28,6 @@ use serde::Deserialize;
 #[cfg(feature = "tracing")]
 use tracing::{instrument, span};
 
-use crate::core::build_steps::llvm;
-use crate::core::build_steps::llvm::LLVM_INVALIDATION_PATHS;
 pub use crate::core::config::flags::Subcommand;
 use crate::core::config::flags::{Color, Flags};
 use crate::core::config::toml::TomlConfig;
@@ -43,32 +41,10 @@ use crate::core::config::{
     DebuginfoLevel, DryRun, GccCiMode, LlvmLibunwind, Merge, ReplaceOpt, RustcLto, SplitDebuginfo,
     StringOrBool, set, threads_from_config,
 };
-use crate::core::download::is_download_ci_available;
 use crate::utils::channel;
-use crate::utils::exec::{ExecutionContext, command};
+use crate::utils::exec::ExecutionContext;
 use crate::utils::helpers::{exe, get_host_target};
 use crate::{GitInfo, OnceLock, TargetSelection, check_ci_llvm, helpers, t};
-
-/// Each path in this list is considered "allowed" in the `download-rustc="if-unchanged"` logic.
-/// This means they can be modified and changes to these paths should never trigger a compiler build
-/// when "if-unchanged" is set.
-///
-/// NOTE: Paths must have the ":!" prefix to tell git to ignore changes in those paths during
-/// the diff check.
-///
-/// WARNING: Be cautious when adding paths to this list. If a path that influences the compiler build
-/// is added here, it will cause bootstrap to skip necessary rebuilds, which may lead to risky results.
-/// For example, "src/bootstrap" should never be included in this list as it plays a crucial role in the
-/// final output/compiler, which can be significantly affected by changes made to the bootstrap sources.
-#[rustfmt::skip] // We don't want rustfmt to oneline this list
-pub const RUSTC_IF_UNCHANGED_ALLOWED_PATHS: &[&str] = &[
-    ":!library",
-    ":!src/tools",
-    ":!src/librustdoc",
-    ":!src/rustdoc-json-types",
-    ":!tests",
-    ":!triagebot.toml",
-];
 
 /// Global configuration for the entire build and/or bootstrap.
 ///
@@ -781,11 +757,10 @@ impl Config {
 
         config.explicit_stage_from_cli = flags_stage.is_some();
 
-        let paths: Vec<PathBuf> = flags_skip.into_iter().chain(flags_exclude).collect();
-
         config.skip.extend(
-            paths
+            flags_skip
                 .into_iter()
+                .chain(flags_exclude)
                 .map(|p| {
                     // Never return top-level path here as it would break `--skip`
                     // logic on rustc's internal test framework which is utilized
@@ -947,47 +922,6 @@ impl Config {
         let mut git = helpers::git(Some(&self.src));
         git.arg("show").arg(format!("{commit}:{}", file.to_str().unwrap()));
         git.run_capture_stdout(self).stdout()
-    }
-
-    /// Bootstrap embeds a version number into the name of shared libraries it uploads in CI.
-    /// Return the version it would have used for the given commit.
-    pub(crate) fn artifact_version_part(&self, commit: &str) -> String {
-        let (channel, version) = if self.rust_info.is_managed_git_subrepository() {
-            let channel =
-                self.read_file_by_commit(Path::new("src/ci/channel"), commit).trim().to_owned();
-            let version =
-                self.read_file_by_commit(Path::new("src/version"), commit).trim().to_owned();
-            (channel, version)
-        } else {
-            let channel = fs::read_to_string(self.src.join("src/ci/channel"));
-            let version = fs::read_to_string(self.src.join("src/version"));
-            match (channel, version) {
-                (Ok(channel), Ok(version)) => {
-                    (channel.trim().to_owned(), version.trim().to_owned())
-                }
-                (channel, version) => {
-                    let src = self.src.display();
-                    eprintln!("ERROR: failed to determine artifact channel and/or version");
-                    eprintln!(
-                        "HELP: consider using a git checkout or ensure these files are readable"
-                    );
-                    if let Err(channel) = channel {
-                        eprintln!("reading {src}/src/ci/channel failed: {channel:?}");
-                    }
-                    if let Err(version) = version {
-                        eprintln!("reading {src}/src/version failed: {version:?}");
-                    }
-                    panic!();
-                }
-            }
-        };
-
-        match channel.as_str() {
-            "stable" => version,
-            "beta" => channel,
-            "nightly" => channel,
-            other => unreachable!("{:?} is not recognized as a valid channel", other),
-        }
     }
 
     /// Try to find the relative path of `bindir`, otherwise return it in full.
@@ -1289,187 +1223,6 @@ impl Config {
 
         if has_local_modifications {
             submodule_git().allow_failure().args(["stash", "pop"]).run(self);
-        }
-    }
-
-    #[cfg(test)]
-    pub fn check_stage0_version(&self, _program_path: &Path, _component_name: &'static str) {}
-
-    /// check rustc/cargo version is same or lower with 1 apart from the building one
-    #[cfg(not(test))]
-    pub fn check_stage0_version(&self, program_path: &Path, component_name: &'static str) {
-        use build_helper::util::fail;
-
-        if self.dry_run() {
-            return;
-        }
-
-        let stage0_output =
-            command(program_path).arg("--version").run_capture_stdout(self).stdout();
-        let mut stage0_output = stage0_output.lines().next().unwrap().split(' ');
-
-        let stage0_name = stage0_output.next().unwrap();
-        if stage0_name != component_name {
-            fail(&format!(
-                "Expected to find {component_name} at {} but it claims to be {stage0_name}",
-                program_path.display()
-            ));
-        }
-
-        let stage0_version =
-            semver::Version::parse(stage0_output.next().unwrap().split('-').next().unwrap().trim())
-                .unwrap();
-        let source_version = semver::Version::parse(
-            fs::read_to_string(self.src.join("src/version")).unwrap().trim(),
-        )
-        .unwrap();
-        if !(source_version == stage0_version
-            || (source_version.major == stage0_version.major
-                && (source_version.minor == stage0_version.minor
-                    || source_version.minor == stage0_version.minor + 1)))
-        {
-            let prev_version = format!("{}.{}.x", source_version.major, source_version.minor - 1);
-            fail(&format!(
-                "Unexpected {component_name} version: {stage0_version}, we should use {prev_version}/{source_version} to build source with {source_version}"
-            ));
-        }
-    }
-
-    /// Returns the commit to download, or `None` if we shouldn't download CI artifacts.
-    pub fn download_ci_rustc_commit(
-        &self,
-        download_rustc: Option<StringOrBool>,
-        debug_assertions_requested: bool,
-        llvm_assertions: bool,
-    ) -> Option<String> {
-        if !is_download_ci_available(&self.host_target.triple, llvm_assertions) {
-            return None;
-        }
-
-        // If `download-rustc` is not set, default to rebuilding.
-        let if_unchanged = match download_rustc {
-            // Globally default `download-rustc` to `false`, because some contributors don't use
-            // profiles for reasons such as:
-            // - They need to seamlessly switch between compiler/library work.
-            // - They don't want to use compiler profile because they need to override too many
-            //   things and it's easier to not use a profile.
-            None | Some(StringOrBool::Bool(false)) => return None,
-            Some(StringOrBool::Bool(true)) => false,
-            Some(StringOrBool::String(s)) if s == "if-unchanged" => {
-                if !self.rust_info.is_managed_git_subrepository() {
-                    println!(
-                        "ERROR: `download-rustc=if-unchanged` is only compatible with Git managed sources."
-                    );
-                    crate::exit!(1);
-                }
-
-                true
-            }
-            Some(StringOrBool::String(other)) => {
-                panic!("unrecognized option for download-rustc: {other}")
-            }
-        };
-
-        let commit = if self.rust_info.is_managed_git_subrepository() {
-            // Look for a version to compare to based on the current commit.
-            // Only commits merged by bors will have CI artifacts.
-            let freshness = self.check_path_modifications(RUSTC_IF_UNCHANGED_ALLOWED_PATHS);
-            self.verbose(|| {
-                eprintln!("rustc freshness: {freshness:?}");
-            });
-            match freshness {
-                PathFreshness::LastModifiedUpstream { upstream } => upstream,
-                PathFreshness::HasLocalModifications { upstream } => {
-                    if if_unchanged {
-                        return None;
-                    }
-
-                    if self.is_running_on_ci {
-                        eprintln!("CI rustc commit matches with HEAD and we are in CI.");
-                        eprintln!(
-                            "`rustc.download-ci` functionality will be skipped as artifacts are not available."
-                        );
-                        return None;
-                    }
-
-                    upstream
-                }
-                PathFreshness::MissingUpstream => {
-                    eprintln!("No upstream commit found");
-                    return None;
-                }
-            }
-        } else {
-            channel::read_commit_info_file(&self.src)
-                .map(|info| info.sha.trim().to_owned())
-                .expect("git-commit-info is missing in the project root")
-        };
-
-        if debug_assertions_requested {
-            eprintln!(
-                "WARN: `rust.debug-assertions = true` will prevent downloading CI rustc as alt CI \
-                rustc is not currently built with debug assertions."
-            );
-            return None;
-        }
-
-        Some(commit)
-    }
-
-    pub fn parse_download_ci_llvm(
-        &self,
-        download_ci_llvm: Option<StringOrBool>,
-        asserts: bool,
-    ) -> bool {
-        // We don't ever want to use `true` on CI, as we should not
-        // download upstream artifacts if there are any local modifications.
-        let default = if self.is_running_on_ci {
-            StringOrBool::String("if-unchanged".to_string())
-        } else {
-            StringOrBool::Bool(true)
-        };
-        let download_ci_llvm = download_ci_llvm.unwrap_or(default);
-
-        let if_unchanged = || {
-            if self.rust_info.is_from_tarball() {
-                // Git is needed for running "if-unchanged" logic.
-                println!("ERROR: 'if-unchanged' is only compatible with Git managed sources.");
-                crate::exit!(1);
-            }
-
-            // Fetching the LLVM submodule is unnecessary for self-tests.
-            #[cfg(not(test))]
-            self.update_submodule("src/llvm-project");
-
-            // Check for untracked changes in `src/llvm-project` and other important places.
-            let has_changes = self.has_changes_from_upstream(LLVM_INVALIDATION_PATHS);
-
-            // Return false if there are untracked changes, otherwise check if CI LLVM is available.
-            if has_changes { false } else { llvm::is_ci_llvm_available_for_target(self, asserts) }
-        };
-
-        match download_ci_llvm {
-            StringOrBool::Bool(b) => {
-                if !b && self.download_rustc_commit.is_some() {
-                    panic!(
-                        "`llvm.download-ci-llvm` cannot be set to `false` if `rust.download-rustc` is set to `true` or `if-unchanged`."
-                    );
-                }
-
-                if b && self.is_running_on_ci {
-                    // On CI, we must always rebuild LLVM if there were any modifications to it
-                    panic!(
-                        "`llvm.download-ci-llvm` cannot be set to `true` on CI. Use `if-unchanged` instead."
-                    );
-                }
-
-                // If download-ci-llvm=true we also want to check that CI llvm is available
-                b && llvm::is_ci_llvm_available_for_target(self, asserts)
-            }
-            StringOrBool::String(s) if s == "if-unchanged" => if_unchanged(),
-            StringOrBool::String(other) => {
-                panic!("unrecognized option for download-ci-llvm: {other:?}")
-            }
         }
     }
 
