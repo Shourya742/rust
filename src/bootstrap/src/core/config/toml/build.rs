@@ -7,12 +7,15 @@
 //! unless specifically overridden by other configuration sections or command-line flags.
 
 use std::collections::HashMap;
+use std::str::FromStr;
 
 use serde::{Deserialize, Deserializer};
 
+use crate::core::config::target_selection::TargetSelectionList;
 use crate::core::config::toml::ReplaceOpt;
-use crate::core::config::{Merge, StringOrBool};
-use crate::{HashSet, PathBuf, define_config, exit};
+use crate::core::config::{Merge, StringOrBool, TargetSelection, set, threads_from_config};
+use crate::helpers::exe;
+use crate::{Config, HashSet, PathBuf, Subcommand, command, define_config, exit, t};
 
 define_config! {
     /// TOML representation of various global build decisions.
@@ -80,5 +83,241 @@ define_config! {
     #[derive(Default, Clone)]
     struct Tool {
         features: Option<Vec<String>> = "features",
+    }
+}
+
+impl Config {
+    pub fn apply_build_config(
+        &mut self,
+        toml_build: Option<Build>,
+        flags_skip_stage0_validation: bool,
+        flags_stage: Option<u32>,
+        flags_host: Option<TargetSelectionList>,
+        flags_target: Option<TargetSelectionList>,
+    ) -> (Option<String>, Option<StringOrBool>) {
+        let Build {
+            description,
+            build,
+            host,
+            target,
+            build_dir,
+            cargo,
+            rustc,
+            rustfmt,
+            cargo_clippy,
+            docs,
+            compiler_docs,
+            library_docs_private_items,
+            docs_minification,
+            submodules,
+            gdb,
+            lldb,
+            nodejs,
+            npm,
+            python,
+            reuse,
+            locked_deps,
+            vendor,
+            full_bootstrap,
+            bootstrap_cache_path,
+            extended,
+            tools,
+            tool,
+            verbose,
+            sanitizers,
+            profiler,
+            cargo_native_static,
+            low_priority,
+            configure_args,
+            local_rebuild,
+            print_step_timings,
+            print_step_rusage,
+            check_stage,
+            doc_stage,
+            build_stage,
+            test_stage,
+            install_stage,
+            dist_stage,
+            bench_stage,
+            patch_binaries_for_nix,
+            // This field is only used by bootstrap.py
+            metrics: _,
+            android_ndk,
+            optimized_compiler_builtins,
+            jobs,
+            compiletest_diff_tool,
+            compiletest_use_stage0_libtest,
+            tidy_extra_checks,
+            ccache,
+            exclude,
+        } = toml_build.unwrap_or_default();
+
+        if let Some(exclude) = exclude {
+            self.skip.extend(
+                exclude
+                    .into_iter()
+                    .map(|p| {
+                        // Never return top-level path here as it would break `--skip`
+                        // logic on rustc's internal test framework which is utilized
+                        // by compiletest.
+                        if cfg!(windows) {
+                            PathBuf::from(p.to_str().unwrap().replace('/', "\\"))
+                        } else {
+                            p
+                        }
+                    })
+                    .collect::<Vec<PathBuf>>(),
+            );
+        }
+
+        if self.jobs.is_none() {
+            self.jobs = Some(threads_from_config(jobs.unwrap_or(0)));
+        }
+
+        if let Some(file_build) = build {
+            self.host_target = TargetSelection::from_user(&file_build);
+        };
+
+        set(&mut self.out, build_dir.map(PathBuf::from));
+
+        if cargo_clippy.is_some() && rustc.is_none() {
+            println!(
+                "WARNING: Using `build.cargo-clippy` without `build.rustc` usually fails due to toolchain conflict."
+            );
+        }
+
+        self.initial_rustc = if let Some(rustc) = rustc {
+            if !flags_skip_stage0_validation {
+                self.check_stage0_version(&rustc, "rustc");
+            }
+            rustc
+        } else {
+            self.download_beta_toolchain();
+            self.out
+                .join(self.host_target)
+                .join("stage0")
+                .join("bin")
+                .join(exe("rustc", self.host_target))
+        };
+
+        self.initial_sysroot = t!(PathBuf::from_str(
+            command(&self.initial_rustc)
+                .args(["--print", "sysroot"])
+                .run_in_dry_run()
+                .run_capture_stdout(&self)
+                .stdout()
+                .trim()
+        ));
+
+        self.initial_cargo_clippy = cargo_clippy;
+
+        self.initial_cargo = if let Some(cargo) = cargo {
+            if !flags_skip_stage0_validation {
+                self.check_stage0_version(&cargo, "cargo");
+            }
+            cargo
+        } else {
+            self.download_beta_toolchain();
+            self.initial_sysroot.join("bin").join(exe("cargo", self.host_target))
+        };
+
+        self.hosts = if let Some(TargetSelectionList(arg_host)) = flags_host {
+            arg_host
+        } else if let Some(file_host) = host {
+            file_host.iter().map(|h| TargetSelection::from_user(h)).collect()
+        } else {
+            vec![self.host_target]
+        };
+        self.targets = if let Some(TargetSelectionList(arg_target)) = flags_target {
+            arg_target
+        } else if let Some(file_target) = target {
+            file_target.iter().map(|h| TargetSelection::from_user(h)).collect()
+        } else {
+            // If target is *not* configured, then default to the host
+            // toolchains.
+            self.hosts.clone()
+        };
+
+        self.nodejs = nodejs.map(PathBuf::from);
+        self.npm = npm.map(PathBuf::from);
+        self.gdb = gdb.map(PathBuf::from);
+        self.lldb = lldb.map(PathBuf::from);
+        self.python = python.map(PathBuf::from);
+        self.reuse = reuse.map(PathBuf::from);
+        self.submodules = submodules;
+        self.android_ndk = android_ndk;
+        self.bootstrap_cache_path = bootstrap_cache_path;
+        set(&mut self.low_priority, low_priority);
+        set(&mut self.compiler_docs, compiler_docs);
+        set(&mut self.library_docs_private_items, library_docs_private_items);
+        set(&mut self.docs_minification, docs_minification);
+        set(&mut self.docs, docs);
+        set(&mut self.locked_deps, locked_deps);
+        set(&mut self.full_bootstrap, full_bootstrap);
+        set(&mut self.extended, extended);
+        self.tools = tools;
+        set(&mut self.tool, tool);
+        set(&mut self.verbose, verbose);
+        set(&mut self.sanitizers, sanitizers);
+        set(&mut self.profiler, profiler);
+        set(&mut self.cargo_native_static, cargo_native_static);
+        set(&mut self.configure_args, configure_args);
+        set(&mut self.local_rebuild, local_rebuild);
+        set(&mut self.print_step_timings, print_step_timings);
+        set(&mut self.print_step_rusage, print_step_rusage);
+        self.patch_binaries_for_nix = patch_binaries_for_nix;
+
+        self.vendor = vendor.unwrap_or(
+            self.rust_info.is_from_tarball()
+                && self.src.join("vendor").exists()
+                && self.src.join(".cargo/config.toml").exists(),
+        );
+
+        self.initial_rustfmt =
+            if let Some(r) = rustfmt { Some(r) } else { self.maybe_download_rustfmt() };
+
+        self.optimized_compiler_builtins =
+            optimized_compiler_builtins.unwrap_or(self.channel != "dev");
+        self.compiletest_diff_tool = compiletest_diff_tool;
+        self.compiletest_use_stage0_libtest = compiletest_use_stage0_libtest.unwrap_or(true);
+        self.tidy_extra_checks = tidy_extra_checks;
+
+        let download_rustc = self.download_rustc_commit.is_some();
+        self.explicit_stage_from_config = test_stage.is_some()
+            || build_stage.is_some()
+            || doc_stage.is_some()
+            || dist_stage.is_some()
+            || install_stage.is_some()
+            || check_stage.is_some()
+            || bench_stage.is_some();
+
+        self.stage = match self.cmd {
+            Subcommand::Check { .. } => flags_stage.or(check_stage).unwrap_or(1),
+            Subcommand::Clippy { .. } | Subcommand::Fix => flags_stage.or(check_stage).unwrap_or(1),
+            // `download-rustc` only has a speed-up for stage2 builds. Default to stage2 unless explicitly overridden.
+            Subcommand::Doc { .. } => {
+                flags_stage.or(doc_stage).unwrap_or(if download_rustc { 2 } else { 1 })
+            }
+            Subcommand::Build => {
+                flags_stage.or(build_stage).unwrap_or(if download_rustc { 2 } else { 1 })
+            }
+            Subcommand::Test { .. } | Subcommand::Miri { .. } => {
+                flags_stage.or(test_stage).unwrap_or(if download_rustc { 2 } else { 1 })
+            }
+            Subcommand::Bench { .. } => flags_stage.or(bench_stage).unwrap_or(2),
+            Subcommand::Dist => flags_stage.or(dist_stage).unwrap_or(2),
+            Subcommand::Install => flags_stage.or(install_stage).unwrap_or(2),
+            Subcommand::Perf { .. } => flags_stage.unwrap_or(1),
+            // These are all bootstrap tools, which don't depend on the compiler.
+            // The stage we pass shouldn't matter, but use 0 just in case.
+            Subcommand::Clean { .. }
+            | Subcommand::Run { .. }
+            | Subcommand::Setup { .. }
+            | Subcommand::Format { .. }
+            | Subcommand::Suggest { .. }
+            | Subcommand::Vendor { .. } => flags_stage.unwrap_or(0),
+        };
+
+        (description, ccache)
     }
 }
