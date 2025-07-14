@@ -368,4 +368,91 @@ impl Config {
             ));
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn download_beta_toolchain(&self) {}
+
+    #[cfg(not(test))]
+    pub(crate) fn download_beta_toolchain(&self) {
+        use crate::core::download::DownloadSource;
+
+        self.verbose(|| println!("downloading stage0 beta artifacts"));
+
+        let date = &self.stage0_metadata.compiler.date;
+        let version = &self.stage0_metadata.compiler.version;
+        let extra_components = ["cargo"];
+
+        let download_beta_component = |config: &Config, filename, prefix: &_, date: &_| {
+            config.download_component(DownloadSource::Dist, filename, prefix, date, "stage0")
+        };
+
+        self.download_toolchain(
+            version,
+            "stage0",
+            date,
+            &extra_components,
+            download_beta_component,
+        );
+    }
+
+    #[cfg(test)]
+    pub(crate) fn maybe_download_rustfmt(&self) -> Option<PathBuf> {
+        Some(PathBuf::new())
+    }
+
+    /// NOTE: rustfmt is a completely different toolchain than the bootstrap compiler, so it can't
+    /// reuse target directories or artifacts
+    #[cfg(not(test))]
+    pub(crate) fn maybe_download_rustfmt(&self) -> Option<PathBuf> {
+        use build_helper::stage0_parser::VersionMetadata;
+
+        use crate::core::download::{DownloadSource, path_is_dylib};
+        use crate::fs;
+        use crate::utils::build_stamp::BuildStamp;
+
+        if self.dry_run() {
+            return Some(PathBuf::new());
+        }
+
+        let VersionMetadata { date, version } = self.stage0_metadata.rustfmt.as_ref()?;
+        let channel = format!("{version}-{date}");
+
+        let host = self.host_target;
+        let bin_root = self.out.join(host).join("rustfmt");
+        let rustfmt_path = bin_root.join("bin").join(exe("rustfmt", host));
+        let rustfmt_stamp = BuildStamp::new(&bin_root).with_prefix("rustfmt").add_stamp(channel);
+        if rustfmt_path.exists() && rustfmt_stamp.is_up_to_date() {
+            return Some(rustfmt_path);
+        }
+
+        self.download_component(
+            DownloadSource::Dist,
+            format!("rustfmt-{version}-{build}.tar.xz", build = host.triple),
+            "rustfmt-preview",
+            date,
+            "rustfmt",
+        );
+        self.download_component(
+            DownloadSource::Dist,
+            format!("rustc-{version}-{build}.tar.xz", build = host.triple),
+            "rustc",
+            date,
+            "rustfmt",
+        );
+
+        if self.should_fix_bins_and_dylibs() {
+            self.fix_bin_or_dylib(&bin_root.join("bin").join("rustfmt"));
+            self.fix_bin_or_dylib(&bin_root.join("bin").join("cargo-fmt"));
+            let lib_dir = bin_root.join("lib");
+            for lib in t!(fs::read_dir(&lib_dir), lib_dir.display().to_string()) {
+                let lib = t!(lib);
+                if path_is_dylib(&lib.path()) {
+                    self.fix_bin_or_dylib(&lib.path());
+                }
+            }
+        }
+
+        t!(rustfmt_stamp.write());
+        Some(rustfmt_path)
+    }
 }

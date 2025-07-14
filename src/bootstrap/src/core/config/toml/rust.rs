@@ -11,7 +11,6 @@ use crate::core::config::toml::TomlConfig;
 use crate::core::config::{
     DebuginfoLevel, Merge, ReplaceOpt, RustcLto, StringOrBool, set, threads_from_config,
 };
-use crate::core::download::is_download_ci_available;
 use crate::flags::Warnings;
 use crate::utils::channel;
 use crate::{BTreeSet, Config, HashSet, PathBuf, TargetSelection, define_config, exit};
@@ -249,6 +248,46 @@ impl RustOptimize {
             RustOptimize::Int(i) => Some(i.to_string()),
             RustOptimize::Bool(_) => None,
         }
+    }
+}
+
+/// Checks whether the CI rustc is available for the given target triple.
+pub(crate) fn is_download_ci_available(target_triple: &str, llvm_assertions: bool) -> bool {
+    // All tier 1 targets and tier 2 targets with host tools.
+    const SUPPORTED_PLATFORMS: &[&str] = &[
+        "aarch64-apple-darwin",
+        "aarch64-pc-windows-msvc",
+        "aarch64-unknown-linux-gnu",
+        "aarch64-unknown-linux-musl",
+        "arm-unknown-linux-gnueabi",
+        "arm-unknown-linux-gnueabihf",
+        "armv7-unknown-linux-gnueabihf",
+        "i686-pc-windows-gnu",
+        "i686-pc-windows-msvc",
+        "i686-unknown-linux-gnu",
+        "loongarch64-unknown-linux-gnu",
+        "powerpc-unknown-linux-gnu",
+        "powerpc64-unknown-linux-gnu",
+        "powerpc64le-unknown-linux-gnu",
+        "riscv64gc-unknown-linux-gnu",
+        "s390x-unknown-linux-gnu",
+        "x86_64-apple-darwin",
+        "x86_64-pc-windows-gnu",
+        "x86_64-pc-windows-msvc",
+        "x86_64-unknown-freebsd",
+        "x86_64-unknown-illumos",
+        "x86_64-unknown-linux-gnu",
+        "x86_64-unknown-linux-musl",
+        "x86_64-unknown-netbsd",
+    ];
+
+    const SUPPORTED_PLATFORMS_WITH_ASSERTIONS: &[&str] =
+        &["x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"];
+
+    if llvm_assertions {
+        SUPPORTED_PLATFORMS_WITH_ASSERTIONS.contains(&target_triple)
+    } else {
+        SUPPORTED_PLATFORMS.contains(&target_triple)
     }
 }
 
