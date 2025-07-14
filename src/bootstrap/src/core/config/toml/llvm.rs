@@ -148,11 +148,6 @@ pub fn check_incompatible_options_for_ci_llvm(
 
 impl Config {
     pub fn apply_llvm_config(&mut self, toml_llvm: Option<Llvm>) {
-        let mut llvm_tests = None;
-        let mut llvm_enzyme = None;
-        let mut llvm_offload = None;
-        let mut llvm_plugins = None;
-
         if let Some(llvm) = toml_llvm {
             let Llvm {
                 optimize: optimize_toml,
@@ -186,15 +181,13 @@ impl Config {
             } = llvm;
 
             set(&mut self.ninja_in_file, ninja);
-            llvm_tests = tests;
-            llvm_enzyme = enzyme;
-            llvm_offload = offload;
-            llvm_plugins = plugins;
             set(&mut self.llvm_optimize, optimize_toml);
             set(&mut self.llvm_thin_lto, thin_lto);
             set(&mut self.llvm_release_debuginfo, release_debuginfo);
             set(&mut self.llvm_static_stdcpp, static_libstdcpp);
             set(&mut self.llvm_libzstd, libzstd);
+            set(&mut self.llvm_use_libcxx, use_libcxx);
+
             if let Some(v) = link_shared {
                 self.llvm_link_shared.set(Some(v));
             }
@@ -207,10 +200,12 @@ impl Config {
             self.llvm_cflags.clone_from(&cflags);
             self.llvm_cxxflags.clone_from(&cxxflags);
             self.llvm_ldflags.clone_from(&ldflags);
-            set(&mut self.llvm_use_libcxx, use_libcxx);
             self.llvm_use_linker.clone_from(&use_linker);
             self.llvm_allow_old_toolchain = allow_old_toolchain.unwrap_or(false);
             self.llvm_offload = offload.unwrap_or(false);
+            self.llvm_tests = tests.unwrap_or(false);
+            self.llvm_enzyme = enzyme.unwrap_or(false);
+            self.llvm_plugins = plugins.unwrap_or(false);
             self.llvm_polly = polly.unwrap_or(false);
             self.llvm_clang = clang.unwrap_or(false);
             self.llvm_enable_warnings = enable_warnings.unwrap_or(false);
@@ -262,11 +257,6 @@ impl Config {
         } else {
             self.llvm_from_ci = self.parse_download_ci_llvm(None, false);
         }
-
-        self.llvm_tests = llvm_tests.unwrap_or(false);
-        self.llvm_enzyme = llvm_enzyme.unwrap_or(false);
-        self.llvm_offload = llvm_offload.unwrap_or(false);
-        self.llvm_plugins = llvm_plugins.unwrap_or(false);
     }
 
     pub fn parse_download_ci_llvm(

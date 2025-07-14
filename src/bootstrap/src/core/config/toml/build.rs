@@ -95,10 +95,10 @@ impl Config {
         flags_stage: Option<u32>,
         flags_host: Option<TargetSelectionList>,
         flags_target: Option<TargetSelectionList>,
-    ) -> (Option<String>, Option<StringOrBool>) {
+    ) {
         let Build {
             description,
-            build,
+            build: _,
             host,
             target,
             build_dir,
@@ -171,13 +171,18 @@ impl Config {
             );
         }
 
+        self.description = description;
+        match ccache {
+            Some(StringOrBool::String(ref s)) => self.ccache = Some(s.to_string()),
+            Some(StringOrBool::Bool(true)) => {
+                self.ccache = Some("ccache".to_string());
+            }
+            Some(StringOrBool::Bool(false)) | None => {}
+        }
+
         if self.jobs.is_none() {
             self.jobs = Some(threads_from_config(jobs.unwrap_or(0)));
         }
-
-        if let Some(file_build) = build {
-            self.host_target = TargetSelection::from_user(&file_build);
-        };
 
         set(&mut self.out, build_dir.map(PathBuf::from));
 
@@ -318,8 +323,6 @@ impl Config {
             | Subcommand::Suggest { .. }
             | Subcommand::Vendor { .. } => flags_stage.unwrap_or(0),
         };
-
-        (description, ccache)
     }
 
     #[cfg(test)]

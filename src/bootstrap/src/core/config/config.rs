@@ -84,6 +84,7 @@ pub struct Config {
     pub include_default_paths: bool,
     pub rustc_error_format: Option<String>,
     pub json_output: bool,
+    pub compile_time_deps: bool,
     pub test_compare_mode: bool,
     pub color: Color,
     pub patch_binaries_for_nix: Option<bool>,
@@ -395,6 +396,7 @@ impl Config {
             jobs: flags_jobs,
             warnings: flags_warnings,
             json_output: flags_json_output,
+            compile_time_deps: flags_compile_time_deps,
             color: flags_color,
             bypass_bootstrap_lock: flags_bypass_bootstrap_lock,
             rust_profile_generate: flags_rust_profile_generate,
@@ -442,6 +444,7 @@ impl Config {
         config.include_default_paths = flags_include_default_paths;
         config.rustc_error_format = flags_rustc_error_format;
         config.json_output = flags_json_output;
+        config.compile_time_deps = flags_compile_time_deps;
         config.on_fail = flags_on_fail;
         config.cmd = flags_cmd;
         config.incremental = flags_incremental;
@@ -690,10 +693,14 @@ impl Config {
         // Verbose flag is a good default for `rust.verbose-tests`.
         config.verbose_tests = config.is_verbose();
 
-        config.apply_install_config(toml.install);
-
         config.llvm_assertions =
             toml.llvm.as_ref().is_some_and(|llvm| llvm.assertions.unwrap_or(false));
+
+        if let Some(flags_build) = flags_build {
+            config.host_target = TargetSelection::from_user(&flags_build);
+        } else if let Some(Some(build)) = toml.build.as_ref().map(|build| build.build.clone()) {
+            config.host_target = TargetSelection::from_user(&build);
+        }
 
         let file_content = t!(fs::read_to_string(config.src.join("src/ci/channel")));
         let ci_channel = file_content.trim_end();
@@ -729,6 +736,39 @@ impl Config {
             config.git_info(config.omit_git_hash, &config.src.join("src/tools/enzyme"));
         config.in_tree_llvm_info = config.git_info(false, &config.src.join("src/llvm-project"));
         config.in_tree_gcc_info = config.git_info(false, &config.src.join("src/gcc"));
+
+        toml.rust.as_ref().map(|rust| {
+            // FIXME(#133381): alt rustc builds currently do *not* have rustc debug assertions
+            // enabled. We should not download a CI alt rustc if we need rustc to have debug
+            // assertions (e.g. for crashes test suite). This can be changed once something like
+            // [Enable debug assertions on alt
+            // builds](https://github.com/rust-lang/rust/pull/131077) lands.
+            //
+            // Note that `rust.debug = true` currently implies `rust.debug-assertions = true`!
+            //
+            // This relies also on the fact that the global default for `download-rustc` will be
+            // `false` if it's not explicitly set.
+            let debug_assertions_requested = matches!(rust.rustc_debug_assertions, Some(true))
+                || (matches!(rust.debug, Some(true))
+                    && !matches!(rust.rustc_debug_assertions, Some(false)));
+
+            if debug_assertions_requested
+                && let Some(ref opt) = rust.download_rustc
+                && opt.is_string_or_true()
+            {
+                eprintln!(
+                    "WARN: currently no CI rustc builds have rustc debug assertions \
+                            enabled. Please either set `rust.debug-assertions` to `false` if you \
+                            want to use download CI rustc or set `rust.download-rustc` to `false`."
+                );
+            }
+
+            config.download_rustc_commit = config.download_ci_rustc_commit(
+                rust.download_rustc.clone(),
+                debug_assertions_requested,
+                config.llvm_assertions,
+            );
+        });
 
         if !is_user_configured_rust_channel && config.rust_info.is_from_tarball() {
             config.channel = ci_channel.into();
@@ -774,35 +814,22 @@ impl Config {
                 .collect::<Vec<PathBuf>>(),
         );
 
-        let (mut description, mut ccache) = config.apply_build_config(
+        config.apply_install_config(toml.install);
+        config.apply_gcc_config(toml.gcc);
+        config.apply_dist_config(toml.dist);
+        config.apply_llvm_config(toml.llvm);
+
+        config.apply_build_config(
             toml.build,
             flags_skip_stage0_validation,
             flags_stage,
             flags_host,
             flags_target,
         );
-        if let Some(flags_build) = flags_build {
-            config.host_target = TargetSelection::from_user(&flags_build);
-        }
+        config.apply_target_config(toml.target);
+        config.apply_rust_config(toml.rust, flags_warnings);
 
         set(&mut config.out, flags_build_dir);
-
-        config.apply_rust_config(toml.rust, flags_warnings, &mut description);
-
-        config.description = description;
-
-        config.apply_llvm_config(toml.llvm, &mut ccache);
-
-        match ccache {
-            Some(StringOrBool::String(ref s)) => config.ccache = Some(s.to_string()),
-            Some(StringOrBool::Bool(true)) => {
-                config.ccache = Some("ccache".to_string());
-            }
-            Some(StringOrBool::Bool(false)) | None => {}
-        }
-
-        config.apply_gcc_config(toml.gcc);
-        config.apply_target_config(toml.target);
 
         if config.llvm_from_ci {
             let triple = &config.host_target.triple;
@@ -819,8 +846,6 @@ impl Config {
             build_target.llvm_filecheck =
                 Some(ci_llvm_bin.join(exe("FileCheck", config.host_target)));
         }
-
-        config.apply_dist_config(toml.dist);
 
         if matches!(config.lld_mode, LldMode::SelfContained)
             && !config.lld_enabled

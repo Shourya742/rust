@@ -538,7 +538,7 @@ impl Config {
                 new_symbol_mangling,
                 profile_generate,
                 profile_use,
-                download_rustc,
+                download_rustc: _,
                 lto,
                 validate_mir_opts,
                 frame_pointers,
@@ -547,37 +547,6 @@ impl Config {
                 lld_mode,
                 std_features: std_features_toml,
             } = rust;
-
-            // FIXME(#133381): alt rustc builds currently do *not* have rustc debug assertions
-            // enabled. We should not download a CI alt rustc if we need rustc to have debug
-            // assertions (e.g. for crashes test suite). This can be changed once something like
-            // [Enable debug assertions on alt
-            // builds](https://github.com/rust-lang/rust/pull/131077) lands.
-            //
-            // Note that `rust.debug = true` currently implies `rust.debug-assertions = true`!
-            //
-            // This relies also on the fact that the global default for `download-rustc` will be
-            // `false` if it's not explicitly set.
-            let debug_assertions_requested = matches!(rustc_debug_assertions_toml, Some(true))
-                || (matches!(debug_toml, Some(true))
-                    && !matches!(rustc_debug_assertions_toml, Some(false)));
-
-            if debug_assertions_requested
-                && let Some(ref opt) = download_rustc
-                && opt.is_string_or_true()
-            {
-                eprintln!(
-                    "WARN: currently no CI rustc builds have rustc debug assertions \
-                            enabled. Please either set `rust.debug-assertions` to `false` if you \
-                            want to use download CI rustc or set `rust.download-rustc` to `false`."
-                );
-            }
-
-            self.download_rustc_commit = self.download_ci_rustc_commit(
-                download_rustc,
-                debug_assertions_requested,
-                self.llvm_assertions,
-            );
 
             debug = debug_toml;
             rustc_debug_assertions = rustc_debug_assertions_toml;
@@ -593,7 +562,6 @@ impl Config {
             debuginfo_level_tests = debuginfo_level_tests_toml;
             lld_enabled = lld_enabled_toml;
             std_features = std_features_toml;
-
             optimize = optimize_toml;
             self.rust_new_symbol_mangling = new_symbol_mangling;
             set(&mut self.rust_optimize_tests, optimize_tests);
