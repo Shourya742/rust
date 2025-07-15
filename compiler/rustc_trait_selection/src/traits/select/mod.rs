@@ -3169,5 +3169,5 @@ pub(crate) enum ProjectionMatchesProjection {
 #[derive(Clone, Debug, TypeFoldable, TypeVisitable)]
 pub(crate) struct AutoImplConstituents<'tcx> {
     pub types: Vec<Ty<'tcx>>,
-    pub assumptions: Vec<ty::OutlivesPredicate<'tcx, ty::GenericArg<'tcx>>>,
+    pub assumptions: Vec<ty::ArgOutlivesPredicate<'tcx>>,
 }
