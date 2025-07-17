@@ -420,6 +420,13 @@ impl Config {
 
         config.exec_ctx = exec_ctx;
 
+        let read_toml = |path: &Path| {
+            get_toml(path).unwrap_or_else(|e| {
+                eprintln!("ERROR: Failed to parse '{}': {e}", path.display());
+                exit!(2);
+            })
+        };
+
         // Set flags.
         config.paths = std::mem::take(&mut flags_paths);
 
@@ -558,10 +565,7 @@ impl Config {
             } else {
                 toml_path.clone()
             });
-            get_toml(&toml_path).unwrap_or_else(|e| {
-                eprintln!("ERROR: Failed to parse '{}': {e}", toml_path.display());
-                exit!(2);
-            })
+            read_toml(&toml_path)
         } else {
             config.config = None;
             TomlConfig::default()
@@ -590,10 +594,7 @@ impl Config {
         for include_path in toml.include.clone().unwrap_or_default().iter().rev() {
             let include_path = toml_path.parent().unwrap().join(include_path);
 
-            let included_toml = get_toml(&include_path).unwrap_or_else(|e| {
-                eprintln!("ERROR: Failed to parse '{}': {e}", include_path.display());
-                exit!(2);
-            });
+            let included_toml = read_toml(&include_path);
             toml.merge(
                 Some(include_path),
                 &mut Default::default(),
@@ -616,13 +617,7 @@ impl Config {
             include_path.push("bootstrap");
             include_path.push("defaults");
             include_path.push(format!("bootstrap.{include}.toml"));
-            let included_toml = get_toml(&include_path).unwrap_or_else(|e| {
-                eprintln!(
-                    "ERROR: Failed to parse default config profile at '{}': {e}",
-                    include_path.display()
-                );
-                exit!(2);
-            });
+            let included_toml = read_toml(&include_path);
             toml.merge(
                 Some(include_path),
                 &mut Default::default(),
