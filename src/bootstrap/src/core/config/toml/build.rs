@@ -320,7 +320,6 @@ impl Config {
             | Subcommand::Run { .. }
             | Subcommand::Setup { .. }
             | Subcommand::Format { .. }
-            | Subcommand::Suggest { .. }
             | Subcommand::Vendor { .. } => flags_stage.unwrap_or(0),
         };
     }
