@@ -795,9 +795,14 @@ impl Config {
                 .collect::<Vec<PathBuf>>(),
         );
 
+        // Though we are applying it here, but the enzyme from llvm should get preference.
+        config.llvm_enzyme =
+            config.llvm_enzyme || config.channel == "dev" || config.channel == "nightly";
+
         config.apply_install_config(toml.install);
         config.apply_gcc_config(toml.gcc);
         config.apply_dist_config(toml.dist);
+        config.apply_llvm_config(toml.llvm);
 
         config.apply_build_config(
             toml.build,
@@ -809,7 +814,6 @@ impl Config {
         );
         config.apply_target_config(toml.target);
         config.apply_rust_config(toml.rust, flags_warnings);
-        config.apply_llvm_config(toml.llvm);
 
         if config.llvm_from_ci {
             let triple = &config.host_target.triple;
